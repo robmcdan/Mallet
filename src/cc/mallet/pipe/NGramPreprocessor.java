@@ -2,12 +2,8 @@ package cc.mallet.pipe;
 
 import java.util.*;
 import java.io.*;
-import org.apache.commons.lang.*;
 import cc.mallet.util.*;
 import cc.mallet.types.*;
-import java.util.regex.*;
-import bktree.BKTree;
-import distance.LevenshteinDistance;
 
 /** This pipe changes text to lowercase, removes common XML entities (quot, apos, lt, gt), and replaces all punctuation
 	except the - character with whitespace. It then breaks up tokens on whitespace and applies n-gram token replacements
@@ -133,9 +129,6 @@ public class NGramPreprocessor extends Pipe implements Serializable {
 				
 				int initialPosition = position;
 				String candidate;
-				//if (replacementIndex.containsKey(token)) {
-					//candidate = replacementIndex[token]
-			//	}
 				if (replacementIndex.containsKey(token)) {
 					for (Replacement replacement: replacementIndex.get(token)) {
 						position = replacement.apply(tokens, position, output);
