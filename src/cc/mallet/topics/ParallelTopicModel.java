@@ -27,6 +27,8 @@ import cc.mallet.topics.TopicAssignment;
 import cc.mallet.util.Randoms;
 import cc.mallet.util.MalletLogger;
 
+import com.carrotsearch.hppc.ObjectIntHashMap;
+
 /**
  * Simple parallel threaded implementation of LDA,
  *  following Newman, Asuncion, Smyth and Welling, Distributed Algorithms for Topic Models
@@ -1253,12 +1255,12 @@ public class ParallelTopicModel implements Serializable {
 
 	public void topicPhraseXMLReport(PrintWriter out, int numWords) {
 		int numTopics = this.getNumTopics();
-		gnu.trove.TObjectIntHashMap<String>[] phrases = new gnu.trove.TObjectIntHashMap[numTopics];
+		ObjectIntHashMap<String>[] phrases = new ObjectIntHashMap[numTopics];
 		Alphabet alphabet = this.getAlphabet();
 		
 		// Get counts of phrases
 		for (int ti = 0; ti < numTopics; ti++)
-			phrases[ti] = new gnu.trove.TObjectIntHashMap<String>();
+			phrases[ti] = new ObjectIntHashMap<String>();
 		for (int di = 0; di < this.getData().size(); di++) {
 			TopicAssignment t = this.getData().get(di);
 			Instance instance = t.instance;
@@ -1286,7 +1288,7 @@ public class ParallelTopicModel implements Serializable {
 					//logger.info ("phrase:"+sbs);
 					if (phrases[prevtopic].get(sbs) == 0)
 						phrases[prevtopic].put(sbs,0);
-					phrases[prevtopic].increment(sbs);
+					phrases[prevtopic].addTo(sbs, 1);
 					prevtopic = prevfeature = -1;
 					sb = null;
 				} else {
@@ -1340,8 +1342,8 @@ public class ParallelTopicModel implements Serializable {
 			*/
 
 			// Print phrases
-			Object[] keys = phrases[ti].keys();
-			int[] values = phrases[ti].getValues();
+			Object[] keys = phrases[ti].keys().toArray();
+			int[] values = phrases[ti].values().toArray();
 			double counts[] = new double[keys.length];
 			for (int i = 0; i < counts.length; i++)	counts[i] = values[i];
 			double countssum = MatrixOps.sum (counts);	
@@ -1770,7 +1772,7 @@ public class ParallelTopicModel implements Serializable {
 				
 				int doc = sorter.getID();
 				double proportion = sorter.getWeight();
-				String name = (String) data.get(doc).instance.getName();
+				String name = data.get(doc).instance.getName().toString();
 				if (name == null) {
 					name = "no-name";
 				}
@@ -2083,30 +2085,4 @@ public class ParallelTopicModel implements Serializable {
 
 		return topicModel;
 	}
-	
-	public static void main (String[] args) {
-		
-		try {
-			
-			InstanceList training = InstanceList.load (new File(args[0]));
-			
-			int numTopics = args.length > 1 ? Integer.parseInt(args[1]) : 200;
-			
-			ParallelTopicModel lda = new ParallelTopicModel (numTopics, 50.0, 0.01);
-			lda.printLogLikelihood = true;
-			lda.setTopicDisplay(50, 7);
-			lda.addInstances(training);
-			
-			lda.setNumThreads(Integer.parseInt(args[2]));
-			lda.estimate();
-			logger.info("printing state");
-			lda.printState(new File("state.gz"));
-			logger.info("finished printing");
-
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
-
-	}
-	
 }

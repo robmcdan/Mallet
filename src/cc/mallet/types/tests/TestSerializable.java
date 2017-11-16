@@ -5,10 +5,17 @@
    version 1.0, as published by http://www.opensource.org.  For further
    information, see the file `LICENSE' included with this distribution. */
 package cc.mallet.types.tests;
+import junit.framework.Test;
+import junit.framework.TestCase;
+import junit.framework.TestSuite;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
 
-import junit.framework.*;
 
-import java.io.*;
 
 /**
  * Static utility for testing serializable classes in MALLET.
@@ -27,7 +34,7 @@ public class TestSerializable extends TestCase {
 
   public static Test suite ()
   {
-    return new TestSuite (TestSerializable.class);
+    return new TestSuite(TestSerializable.class);
   }
 
   /**

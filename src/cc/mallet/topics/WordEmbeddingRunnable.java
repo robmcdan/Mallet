@@ -14,16 +14,18 @@ public class WordEmbeddingRunnable implements Runnable {
 
 	int numThreads;
 	int threadID;
+	int iteration = 0;
 	
-	int stride;
-	
-	public int docID;
+	int stride, docID;
 
 	public Random random;
 
 	int numColumns;
+	
+	int orderingStrategy = WordEmbeddings.LINEAR_ORDERING;
 
-	public int wordsSoFar = 0;
+	public long wordsSoFar = 0;
+	private int minDocumentLength;
 
 	public WordEmbeddingRunnable(WordEmbeddings model, InstanceList instances, int numSamples, int numThreads, int threadID) {
 		this.model = model;
@@ -36,6 +38,15 @@ public class WordEmbeddingRunnable implements Runnable {
 		random = new Random();
 
 		numColumns = model.numColumns;
+		minDocumentLength = model.getMinDocumentLength();
+	}
+	
+	public void setRandomSeed(int seed) {
+		random = new Random(seed);
+	}
+	
+	public void setOrdering(int strategy) {
+		this.orderingStrategy = strategy;
 	}
 
 	public double getMeanError() {
@@ -48,134 +59,172 @@ public class WordEmbeddingRunnable implements Runnable {
 	}
 
 	public void run() {
+		long previousWordsSoFar = 0;
+		long wordsConsidered = 0;
+		long wordsSampled = 0;
+		
 		int numDocuments = instances.size();
+		int inputTypeOffset, outputTypeOffset, sampledTypeOffset;
 
-		double sampleNormalizer = 1.0f / numSamples;
+		int inputType, outputType, sampledType;
+		int start, end, subWindow;
+		
+		double innerProduct, weightedResidual;
+		double learningRate = 0.025;
 
+		double gradientSum = 0.0;
 		double[] gradient = new double[numColumns];
 
-		int queryID = model.vocabulary.lookupIndex(model.queryWord);
+		int minDoc = threadID * (numDocuments / numThreads);
+		int maxDoc = (threadID + 1) * (numDocuments / numThreads);
+		int numDocs = maxDoc - minDoc;
+		int[] agenda = new int[numDocs];
 
-		int outputOffset = model.numColumns;
+		if (orderingStrategy == WordEmbeddings.SHUFFLED_ORDERING) {
+			for (int i = 0; i < numDocs; i++) {
+				agenda[i] = i;
+			}
+			for (int i = 0; i < numDocs; i++) {
+				int swapIndex = i + random.nextInt(numDocs - i);
+				int temp = agenda[swapIndex];
+				agenda[swapIndex] = agenda[i];
+				agenda[i] = temp;
+			}
+		}
+		else if (orderingStrategy == WordEmbeddings.RANDOM_ORDERING) {
+			for (int i = 0; i < numDocs; i++) {
+				agenda[i] = minDoc + random.nextInt(numDocs);
+			}
+		}
+		else { // Default: linear ordering
+			for (int i = 0; i < numDocs; i++) {
+				agenda[i] = minDoc + i;
+			}
+		}
 
-		docID = threadID * (numDocuments / numThreads);
+		docID = 0;
 		int maxDocID = (threadID + 1) * (numDocuments / numThreads);
 		if (maxDocID > numDocuments) {
 			maxDocID = numDocuments;
 		}
 		
-		double cacheScale = 1.0 / (model.maxExpValue - model.minExpValue);
+		double cacheScale = (double) model.sigmoidCacheSize / (model.maxExpValue - model.minExpValue);
 		
 		int[] tokenBuffer = new int[100000];
-		
+				
 		while (shouldRun) {
-			Instance instance = instances.get( docID );
+			Instance instance = instances.get( agenda[docID] );
 			docID++;
 
-			if (docID == maxDocID) { 
+			if (docID == numDocs) { 
 				// start over at the beginning
-				docID = threadID * (numDocuments / numThreads);
+				docID = 0;
+				iteration++;
+				if (iteration >= model.numIterations) {
+					shouldRun = false;
+					return;
+				}
 			}
 
-			double learningRate = Math.max(0.0001, 0.025 * (1.0 - (double) numThreads * wordsSoFar / model.totalWords));
+			if (wordsSoFar - previousWordsSoFar > 10000) {
+				learningRate = Math.max(0.025 * 0.0001, 0.025 * (1.0 - (double) numThreads * wordsSoFar / (model.numIterations * model.totalWords)));			
+				previousWordsSoFar = wordsSoFar;
+				//System.out.format("%f\t%f\t%d\t%d\t%d\t%f\t%f\n", learningRate, 100.0 * wordsSoFar / model.totalWords, wordsSoFar, wordsConsidered, updates, (double) updates / wordsConsidered, gradientSum / updates);
+			}
+			
+			double[] weights = model.weights;
+			double[] negativeWeights = model.negativeWeights;
 			
 			FeatureSequence tokens = (FeatureSequence) instance.getData();
 			int originalLength = tokens.getLength();
 			int length = 0;
 			
+			// Subsample the document, dropping frequent words frequently.
 			for (int inputPosition = 0; inputPosition < originalLength; inputPosition++) {
-				int inputType = tokens.getIndexAtPosition(inputPosition);
+				inputType = tokens.getIndexAtPosition(inputPosition);
 				
 				wordsSoFar++;
-				
-				double frequencyScore = (double) model.wordCounts[inputType] / (0.0001 * model.totalWords);
-				if (random.nextDouble() < (Math.sqrt(frequencyScore) + 1) / frequencyScore) {
+
+				if (random.nextDouble() < model.retentionProbability[inputType]) {
 					tokenBuffer[length] = inputType;
 					length++;
+					wordsSampled++;
 				}				
 			}			
 				
 			// Skip short documents
-			if (length < 10) { continue; }
+			assert minDocumentLength > 0;
+			if (length < minDocumentLength) { continue; }
 			
 			for (int inputPosition = 0; inputPosition < length; inputPosition++) {
-				int inputType = tokenBuffer[inputPosition];
+
+				wordsConsidered++;
+				inputType = tokenBuffer[inputPosition];
+				inputTypeOffset = inputType * stride;
 				
-				int subWindow = model.windowSize;
-				int start = Math.max(0, inputPosition - subWindow);
-				int end = Math.min(length - 1, inputPosition + subWindow);
+				subWindow = random.nextInt(model.windowSize) + 1;
+				start = Math.max(0, inputPosition - subWindow);
+				end = Math.min(length - 1, inputPosition + subWindow);
 				for (int outputPosition = start; outputPosition <= end; outputPosition++) {
 					if (inputPosition == outputPosition) { continue; }
-					int outputType = tokenBuffer[outputPosition];
-					if (inputType == outputType) { continue; }
+					outputType = tokenBuffer[outputPosition];
+					//if (inputType == outputType) { continue; }
 					
-					double innerProduct = model.weights[inputType * stride + 0] + model.weights[inputType * stride + outputOffset];
-					for (int col = 1; col < numColumns; col++) {
-						innerProduct += model.weights[inputType * stride + col] * model.weights[outputType * stride + outputOffset + col];
+					outputTypeOffset = outputType * stride;
+					
+					innerProduct = 0.0;
+					for (int col = 0; col < numColumns; col++) {
+						innerProduct += negativeWeights[inputTypeOffset + col] * weights[outputTypeOffset + col];
 					}
 					
-					double prediction;
 					if (innerProduct < model.minExpValue) {
-						prediction = 0.0;
+						weightedResidual = learningRate;  // (1.0 - 0.0)
 					}
 					else if (innerProduct > model.maxExpValue) {
-						prediction = 1.0;
+						weightedResidual = 0.0; // (1.0 - 1.0)
 					}
 					else {
-						prediction = model.sigmoidCache[ (int) Math.floor( model.sigmoidCacheSize *
-								(innerProduct - model.minExpValue) * cacheScale ) ];
+						weightedResidual = learningRate * (1.0 - model.sigmoidCache[ (int) Math.floor( (innerProduct - model.minExpValue) * cacheScale ) ]);
 					}
 					
-					//assert (! Double.isNaN(prediction));
-					
-					gradient[0] = (1.0f - prediction);
-					model.weights[outputType * stride + outputOffset] += learningRate * (1.0f - prediction);
-					for (int col = 1; col < numColumns; col++) {
-						gradient[col] = (1.0f - prediction) * model.weights[outputType * stride + outputOffset + col];
-						model.weights[outputType * stride + outputOffset + col] += learningRate * ((1.0f - prediction) * model.weights[inputType * stride + col]);
+					for (int col = 0; col < numColumns; col++) {
+						gradient[col] = weightedResidual * negativeWeights[inputTypeOffset + col];
+						negativeWeights[inputTypeOffset + col] += weightedResidual * weights[outputTypeOffset + col];
 					}
-					//if (outputType == queryID) { System.out.format("neg: %f g: %f\n", model.negativeWeights[inputType][0], learningRate * (1.0 - prediction)); }
-					
+
 					double meanNegativePrediction = 0.0;
 					for (int sample = 0; sample < numSamples; sample++) {
-						int sampledType = model.samplingTable[ random.nextInt(model.samplingTableSize) ];
-						//System.out.format("%s %s %d\n", vocabulary.lookupObject(outputType), vocabulary.lookupObject(sampledType), 0);
-						int sampledTypeOffset = sampledType * stride;
+						sampledType = model.samplingTable[ random.nextInt(model.samplingTableSize) ];
+						if (sampledType == inputType) { continue; }
 						
-						innerProduct = model.weights[inputType * stride + 0] + model.weights[sampledTypeOffset + outputOffset];;
+						sampledTypeOffset = sampledType * stride;
+						
+						innerProduct = 0.0;
 						for (int col = 0; col < numColumns; col++) {
-							innerProduct += model.weights[inputType * stride + col] * model.weights[sampledTypeOffset + outputOffset + col];
+							innerProduct += negativeWeights[sampledTypeOffset + col] * weights[outputTypeOffset + col];
 						}
-						
-						double negativePrediction = 0.0;
 						
 						if (innerProduct < model.minExpValue) {
-							negativePrediction = 0.0;
+							weightedResidual = 0.0; // (0.0 - 0.0)
 						}
 						else if (innerProduct > model.maxExpValue) {
-							negativePrediction = 1.0;
+							weightedResidual = -learningRate; // (0.0 - 1.0)
 						}
 						else {
-							negativePrediction = model.sigmoidCache[ (int) Math.floor( model.sigmoidCacheSize * (innerProduct - model.minExpValue) * cacheScale ) ];
+							weightedResidual = learningRate * -model.sigmoidCache[ (int) Math.floor( (innerProduct - model.minExpValue) * cacheScale ) ];
 						}
 						
-						//assert (! Double.isNaN(negativePrediction));
-						
-						meanNegativePrediction += negativePrediction;
-						
-						gradient[0] += sampleNormalizer * (-negativePrediction);
-						model.weights[sampledTypeOffset + outputOffset] += learningRate * sampleNormalizer * (-negativePrediction);
-						for (int col = 1; col < numColumns; col++) {
-							gradient[col] += sampleNormalizer * (-negativePrediction * model.weights[sampledType * stride + outputOffset + col]);
-							model.weights[sampledTypeOffset + outputOffset + col] += learningRate * sampleNormalizer * (-negativePrediction * model.weights[inputType * stride + col]);
+						for (int col = 0; col < numColumns; col++) {
+							gradient[col] += weightedResidual * negativeWeights[sampledTypeOffset + col];
+							negativeWeights[sampledTypeOffset + col] += weightedResidual * weights[outputTypeOffset + col];
 						}
 					}
 					
-					residual += prediction - meanNegativePrediction * sampleNormalizer;
+					//residual += prediction - meanNegativePrediction;
 					numUpdates++;
 					
 					for (int col = 0; col < numColumns; col++) {
-						model.weights[inputType * stride + col] += learningRate * (gradient[col]);
+						weights[outputTypeOffset + col] += gradient[col];
 					}
 				}
 			}					
